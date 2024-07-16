@@ -51,6 +51,8 @@ async function run() {
     try {
         const db = client.db('axionpayDB');
         const usersCollection = db.collection('users');
+        const transactionsCollection = db.collection('transactions');
+
 
         const verifyAdmin = async (req, res, next) => {
             const user = req.user;
@@ -168,33 +170,106 @@ async function run() {
         });
 
 
-        // Send Money
+        // Check PIN API
         app.post('/send-money', async (req, res) => {
-            const { fromEmail, toEmail, amount } = req.body;
+            const { fromEmail, toEmail, amount, password } = req.body;
+            console.log('Received request:', fromEmail, toEmail, amount, password);
 
-            const fromUser = await usersCollection.findOne({ email: fromEmail });
-            const toUser = await usersCollection.findOne({ email: toEmail });
+            try {
+                const fromUser = await usersCollection.findOne({ email: fromEmail });
+                const toUser = await usersCollection.findOne({ email: toEmail });
 
-            if (!fromUser || !toUser) {
-                return res.status(404).send({ success: false, message: 'User not found' });
+                console.log('From User:', fromUser);
+                console.log('To User:', toUser);
+
+                if (!fromUser || !toUser) {
+                    console.log('User not found');
+                    return res.status(404).send({ success: false, message: 'User not found' });
+                }
+
+                // Verify the password
+                const isPasswordCorrect = await bcrypt.compare(password, fromUser.password);
+                console.log('Is Password Correct:', isPasswordCorrect);
+
+                if (!isPasswordCorrect) {
+                    console.log('Incorrect password');
+                    return res.status(401).send({ success: false, message: 'Incorrect password' });
+                }
+
+                // Check for sufficient balance
+                console.log('From User Balance:', fromUser.balance, 'Amount:', amount);
+                if (fromUser.balance < amount) {
+                    console.log('Insufficient balance');
+                    return res.status(400).send({ success: false, message: 'Insufficient balance' });
+                }
+
+                // Perform the transaction
+                console.log('Performing transaction...');
+                await usersCollection.updateOne(
+                    { email: fromEmail },
+                    { $inc: { balance: -amount } }
+                );
+
+                await usersCollection.updateOne(
+                    { email: toEmail },
+                    { $inc: { balance: amount } }
+                );
+
+                // Save transaction
+                const transaction = {
+                    fromEmail,
+                    toEmail,
+                    amount,
+                    timestamp: new Date(),
+                };
+
+                await transactionsCollection.insertOne(transaction);
+
+                console.log('Transaction successful');
+                res.send({ success: true, message: 'Money sent successfully' });
+            } catch (error) {
+                console.error('Error during transaction:', error);
+                res.status(500).send({ success: false, message: 'Internal server error' });
             }
-
-            if (fromUser.balance < amount) {
-                return res.status(400).send({ success: false, message: 'Insufficient balance' });
-            }
-
-            await usersCollection.updateOne(
-                { email: fromEmail },
-                { $inc: { balance: -amount } }
-            );
-
-            await usersCollection.updateOne(
-                { email: toEmail },
-                { $inc: { balance: amount } }
-            );
-
-            res.send({ success: true, message: 'Money sent successfully' });
         });
+
+
+        app.get('/transactions/:email', async (req, res) => {
+            const email = req.params.email;
+
+            const transactions = await transactionsCollection
+                .find({ $or: [{ fromEmail: email }, { toEmail: email }] })
+                .sort({ timestamp: -1 })
+                .limit(10)
+                .toArray();
+
+            res.send(transactions);
+        });
+
+
+
+        // Check Password
+        app.post('/check-password', async (req, res) => {
+            const { password } = req.body;
+            const token = req.cookies.token;
+
+            if (!token) return res.status(401).send('Not authenticated');
+
+            try {
+                const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
+                const user = await usersCollection.findOne({ email: decoded.email });
+
+                if (user && await bcrypt.compare(password, user.password)) {
+                    return res.send({ success: true });
+                } else {
+                    return res.status(401).send({ success: false, message: 'Incorrect password' });
+                }
+            } catch (err) {
+                res.status(401).send('Not authenticated');
+            }
+        });
+
+
 
         console.log('Pinged your deployment. You successfully connected to MongoDB!');
     } finally {
