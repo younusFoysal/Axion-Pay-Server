@@ -12,7 +12,8 @@ const port = process.env.PORT || 5000;
 const corsOptions = {
     origin: [
         'http://localhost:5173',
-        'http://localhost:5174'
+        'http://localhost:5174',
+        'https://axion-pay.web.app'
     ],
     credentials: true,
     optionSuccessStatus: 200,
@@ -76,22 +77,33 @@ async function run() {
         };
 
         app.post('/jwt', async (req, res) => {
-            const user = req.body;
-            const storedUser = await usersCollection.findOne({ email: user.email });
+            const { identifier, password } = req.body; // identifier can be either email or phone
 
-            if (storedUser && await bcrypt.compare(user.password, storedUser.password)) {
-                const token = jwt.sign({ email: user.email }, process.env.ACCESS_TOKEN_SECRET, {
-                    expiresIn: '365d',
+            try {
+                const storedUser = await usersCollection.findOne({
+                    $or: [{ email: identifier }, { phone: identifier }],
                 });
-                res.cookie('token', token, {
-                    httpOnly: true,
-                    secure: process.env.NODE_ENV === 'production',
-                    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'strict',
-                }).send({ success: true });
-            } else {
-                res.status(401).send({ success: false, message: 'Authentication failed' });
+
+                if (storedUser && await bcrypt.compare(password, storedUser.password)) {
+                    const token = jwt.sign(
+                        { email: storedUser.email, phone: storedUser.phone },
+                        process.env.ACCESS_TOKEN_SECRET,
+                        { expiresIn: '365d' }
+                    );
+                    res.cookie('token', token, {
+                        httpOnly: true,
+                        secure: process.env.NODE_ENV === 'production',
+                        sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'strict',
+                    }).send({ success: true });
+                } else {
+                    res.status(401).send({ success: false, message: 'Authentication failed' });
+                }
+            } catch (error) {
+                console.error('Error during authentication:', error);
+                res.status(500).send({ success: false, message: 'Internal server error' });
             }
         });
+
 
         app.get('/logout', async (req, res) => {
             try {
@@ -134,23 +146,46 @@ async function run() {
                 return res.send(isExist);
             }
             const options = { upsert: true };
+            let Balance = 0;
+            if (user.role === 'user'){
+                Balance = 40;
+            } else if (user.role === 'agent'){
+                Balance = 10000;
+            } else {
+                Balance = 0;
+            }
             const updateDoc = {
                 $set: {
+                    name: user?.name,
+                    role: user.role,
                     email: user.email,
+                    phone: user?.phone,
                     password: hashedPassword,
-                    balance: 40,
+                    status: user.status,
+                    balance: Balance,
                     timestamp: Date.now(),
                 },
             };
+            console.log(updateDoc)
             const result = await usersCollection.updateOne(query, updateDoc, options);
             res.send(result);
         });
 
-        app.get('/user/:email', async (req, res) => {
-            const email = req.params.email;
-            const result = await usersCollection.findOne({ email });
-            res.send(result);
+        // app.get('/user/:email', async (req, res) => {
+        //     const email = req.params.email;
+        //     const result = await usersCollection.findOne({ email });
+        //     res.send(result);
+        // });
+
+        app.get('/user/:identifier', async (req, res) => {
+            const identifier =  req.params.identifier;
+            const storedUser = await usersCollection.findOne({
+                $or: [{ email: identifier }, { phone: identifier }],
+            });
+            res.send(storedUser);
         });
+
+
 
         app.get('/users', async (req, res) => {
             const result = await usersCollection.find().toArray();
