@@ -219,6 +219,28 @@ async function run() {
             res.send(result);
         });
 
+        //update users status - true or false
+        app.patch('/users/update/:email', verifyToken, async (req, res) => {
+            const email = req.params.email;
+            const { status } = req.body; // Destructure status from req.body
+            const query = { email };
+            const updateDoc = {
+                $set: { status, timestamp: Date.now() },
+            };
+
+            try {
+                const result = await usersCollection.updateOne(query, updateDoc);
+                if (result.modifiedCount > 0) {
+                    res.send({ success: true, message: 'User status updated successfully' });
+                } else {
+                    res.send({ success: false, message: 'User not found or status not changed' });
+                }
+            } catch (error) {
+                res.status(500).send({ success: false, message: 'Error updating user status', error });
+            }
+        });
+
+
 
         app.patch('/users/update/:email', verifyToken, async (req, res) => {
             const email = req.params.email;
