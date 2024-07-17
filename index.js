@@ -23,19 +23,21 @@ app.use(express.json());
 app.use(cookieParser());
 
 const verifyToken = async (req, res, next) => {
-    const token = req.cookies?.token;
-    console.log(token);
+    const { token } = req.cookies;
+    //console.log('Token from cookie:', token);
+
     if (!token) {
         return res.status(401).send({ message: 'unauthorized access' });
     }
-    jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
-        if (err) {
-            console.log(err);
-            return res.status(401).send({ message: 'unauthorized access' });
-        }
+
+    try {
+        const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
         req.user = decoded;
         next();
-    });
+    } catch (err) {
+        console.log(err);
+        return res.status(401).send({ message: 'unauthorized access' });
+    }
 };
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.q3baw43.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
@@ -53,6 +55,8 @@ async function run() {
         const db = client.db('axionpayDB');
         const usersCollection = db.collection('users');
         const transactionsCollection = db.collection('transactions');
+        const cashInRequestsCollection = db.collection('cashInRequests');
+
 
 
         const verifyAdmin = async (req, res, next) => {
@@ -127,7 +131,7 @@ async function run() {
                 const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
                 const user = await usersCollection.findOne({ email: decoded.email });
                 if (user) {
-                    res.send({ email: user.email });
+                    res.send({ user });
                 } else {
                     res.status(401).send('Not authenticated');
                 }
@@ -135,6 +139,7 @@ async function run() {
                 res.status(401).send('Not authenticated');
             }
         });
+
 
 
         app.put('/user', async (req, res) => {
@@ -205,9 +210,9 @@ async function run() {
         });
 
 
-        // Check PIN API
-        app.post('/send-money', async (req, res) => {
-            const { fromEmail, toEmail, amount, password } = req.body;
+        // Send Money API
+        app.post('/send-money', verifyToken, async (req, res) => {
+            const { fromEmail, toEmail, amount, password , transType} = req.body;
             console.log('Received request:', fromEmail, toEmail, amount, password);
 
             try {
@@ -255,6 +260,7 @@ async function run() {
                     fromEmail,
                     toEmail,
                     amount,
+                    transType,
                     timestamp: new Date(),
                 };
 
@@ -269,13 +275,162 @@ async function run() {
         });
 
 
-        app.get('/transactions/:email', async (req, res) => {
+
+        // Cash-Request API
+        app.post('/request-cash-in', verifyToken, async (req, res) => {
+            const { agentEmail, userEmail, amount } = req.body;
+            console.log('Received cash-in request:', agentEmail, userEmail, amount);
+
+            try {
+                const agent = await usersCollection.findOne({ email: agentEmail });
+                const user = await usersCollection.findOne({ email: userEmail });
+
+                console.log('Agent:', agent);
+                console.log('User:', user);
+
+                if (!agent || !user) {
+                    console.log('Agent or user not found');
+                    return res.status(404).send({ success: false, message: 'Agent or user not found' });
+                }
+
+                if (agent.role !== 'agent' || user.role !== 'user') {
+                    console.log('Invalid roles');
+                    return res.status(403).send({ success: false, message: 'Invalid roles' });
+                }
+
+                // Create cash-in request
+                const cashInRequest = {
+                    agentEmail,
+                    userEmail,
+                    amount,
+                    status: 'pending',
+                    requestedAt: new Date(),
+                };
+
+                const result = await cashInRequestsCollection.insertOne(cashInRequest);
+
+                console.log('Cash-in request created:', result.insertedId);
+                res.send({ success: true, message: 'Cash-in request created successfully', requestId: result.insertedId });
+            } catch (error) {
+                console.error('Error creating cash-in request:', error);
+                res.status(500).send({ success: false, message: 'Internal server error' });
+            }
+        });
+
+
+
+        // Approve Cash In Request
+        app.post('/approve-cash-in', verifyToken, async (req, res) => {
+            const { agentEmail, userEmail, requestId } = req.body;
+            console.log('Received cash-in approval request:', agentEmail, userEmail, requestId);
+
+            try {
+                const agent = await usersCollection.findOne({ email: agentEmail });
+                const user = await usersCollection.findOne({ email: userEmail });
+                const cashInRequest = await cashInRequestsCollection.findOne({ _id: new ObjectId(requestId) });
+
+                console.log('Agent:', agent);
+                console.log('User:', user);
+                console.log('Cash-In Request:', cashInRequest);
+
+                if (!agent || !user || !cashInRequest) {
+                    console.log('Agent, user, or request not found');
+                    return res.status(404).send({ success: false, message: 'Agent, user, or request not found' });
+                }
+
+                // // Verify the password
+                // const isPasswordCorrect = await bcrypt.compare(password, agent.password);
+                // console.log('Is Password Correct:', isPasswordCorrect);
+                //
+                // if (!isPasswordCorrect) {
+                //     console.log('Incorrect password');
+                //     return res.status(401).send({ success: false, message: 'Incorrect password' });
+                // }
+
+                // Check for sufficient balance
+                const amount = cashInRequest.amount;
+                console.log('Agent Balance:', agent.balance, 'Amount:', amount);
+                if (agent.balance < amount) {
+                    console.log('Insufficient balance');
+                    return res.status(400).send({ success: false, message: 'Insufficient balance' });
+                }
+
+                // Perform the transaction
+                console.log('Performing cash-in transaction...');
+                await usersCollection.updateOne(
+                    { email: agentEmail },
+                    { $inc: { balance: -amount } }
+                );
+
+                await usersCollection.updateOne(
+                    { email: userEmail },
+                    { $inc: { balance: amount } }
+                );
+
+                // Save transaction
+                const transaction = {
+                    fromEmail: agentEmail,
+                    toEmail: userEmail,
+                    amount,
+                    transType: 'cash-in',
+                    timestamp: new Date(),
+                };
+
+                await transactionsCollection.insertOne(transaction);
+
+                // Mark the request as approved
+                await cashInRequestsCollection.updateOne(
+                    { _id: new ObjectId(requestId) },
+                    { $set: { status: 'approved', approvedAt: new Date() } }
+                );
+
+                console.log('Cash-in transaction successful');
+                res.send({ success: true, message: 'Cash-in request approved successfully' });
+            } catch (error) {
+                console.error('Error during cash-in approval:', error);
+                res.status(500).send({ success: false, message: 'Internal server error' });
+            }
+        });
+
+
+
+        app.get('/request-cash-in', verifyToken, async (req, res) => {
+            try {
+                const cashInRequests = await cashInRequestsCollection.find().toArray();
+                console.log('Cash-in requests retrieved:', cashInRequests);
+                res.send({ success: true, cashInRequests });
+            } catch (error) {
+                console.error('Error retrieving cash-in requests:', error);
+                res.status(500).send({ success: false, message: 'Internal server error' });
+            }
+        });
+
+
+        app.get('/request-cash-in/:email', verifyToken, async (req, res) => {
+            try {
+                const email = req.params.email;
+
+                const cashInRequests = await cashInRequestsCollection
+                    .find({ agentEmail: email})
+                    .sort({ requestedAt: -1 })
+                    .toArray();
+                console.log('Cash-in requests retrieved:', cashInRequests);
+                res.send({ success: true, cashInRequests });
+            } catch (error) {
+                console.error('Error retrieving cash-in requests:', error);
+                res.status(500).send({ success: false, message: 'Internal server error' });
+            }
+        });
+
+
+
+        app.get('/transactions/:email',verifyToken, async (req, res) => {
             const email = req.params.email;
 
             const transactions = await transactionsCollection
                 .find({ $or: [{ fromEmail: email }, { toEmail: email }] })
                 .sort({ timestamp: -1 })
-                .limit(10)
+                .limit(100)
                 .toArray();
 
             res.send(transactions);
