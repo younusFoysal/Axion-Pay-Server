@@ -56,6 +56,8 @@ async function run() {
         const usersCollection = db.collection('users');
         const transactionsCollection = db.collection('transactions');
         const cashInRequestsCollection = db.collection('cashInRequests');
+        const cashOutRequestsCollection = db.collection('cashOutRequests');
+
 
 
 
@@ -193,11 +195,30 @@ async function run() {
         });
 
 
-
+        // get all users
         app.get('/users', async (req, res) => {
             const result = await usersCollection.find().toArray();
             res.send(result);
         });
+
+        // get users - user
+        app.get('/usersUser', async (req, res) => {
+            const result = await usersCollection
+                .find({role:"user"})
+                .sort({ timestamp: -1 })
+                .toArray();
+            res.send(result);
+        });
+
+        // get users - agents
+        app.get('/usersAgent', async (req, res) => {
+            const result = await usersCollection
+                .find({role:"agent"})
+                .sort({ timestamp: -1 })
+                .toArray();
+            res.send(result);
+        });
+
 
         app.patch('/users/update/:email', verifyToken, async (req, res) => {
             const email = req.params.email;
@@ -277,8 +298,8 @@ async function run() {
         });
 
 
-
-        // Cash-Request API
+        // TODO: Cash-in Request API
+        // Cash-in Request API
         app.post('/request-cash-in', verifyToken, async (req, res) => {
             const { agentEmail, userEmail, amount } = req.body;
             console.log('Received cash-in request:', agentEmail, userEmail, amount);
@@ -454,6 +475,208 @@ async function run() {
                 res.send({ success: true, cashInRequests });
             } catch (error) {
                 console.error('Error retrieving cash-in requests:', error);
+                res.status(500).send({ success: false, message: 'Internal server error' });
+            }
+        });
+
+
+
+        // TODO:  Cash-Out Request API
+        // Cash Out Request Api
+        app.post('/request-cash-out', verifyToken, async (req, res) => {
+            const { agentEmail, userEmail, amount, password} = req.body;
+            console.log('Received cash-out request:', agentEmail, userEmail, amount);
+
+            try {
+                const agent = await usersCollection.findOne({ email: agentEmail });
+                const user = await usersCollection.findOne({ email: userEmail });
+
+                console.log('Agent:', agent);
+                console.log('User:', user);
+
+                if (!agent || !user) {
+                    console.log('Agent or user not found');
+                    return res.status(404).send({ success: false, message: 'Agent or user not found' });
+                }
+
+                if (agent.role !== 'agent' || user.role !== 'user') {
+                    console.log('Invalid roles');
+                    return res.status(403).send({ success: false, message: 'Invalid roles' });
+                }
+
+
+                // Verify the password
+                const isPasswordCorrect = await bcrypt.compare(password, user.password);
+                console.log('Is Password Correct:', isPasswordCorrect);
+
+                if (!isPasswordCorrect) {
+                    console.log('Incorrect password');
+                    return res.status(401).send({ success: false, message: 'Incorrect password' });
+                }
+
+
+                // Create cash-out request
+                const cashOutRequest = {
+                    agentEmail,
+                    userEmail,
+                    amount,
+                    fee: amount * 0.015,
+                    status: 'pending',
+                    requestedAt: new Date(),
+                };
+
+                const result = await cashOutRequestsCollection.insertOne(cashOutRequest);
+
+                console.log('Cash-out request created:', result.insertedId);
+                res.send({ success: true, message: 'Cash-out request created successfully', requestId: result.insertedId });
+            } catch (error) {
+                console.error('Error creating cash-out request:', error);
+                res.status(500).send({ success: false, message: 'Internal server error' });
+            }
+        });
+
+
+
+        // cash Out Approve Api
+        app.post('/approve-cash-out', verifyToken, async (req, res) => {
+            const { agentEmail, userEmail, requestId } = req.body;
+            console.log('Received cash-out approval request:', agentEmail, userEmail, requestId);
+
+            try {
+                const agent = await usersCollection.findOne({ email: agentEmail });
+                const user = await usersCollection.findOne({ email: userEmail });
+                const cashOutRequest = await cashOutRequestsCollection.findOne({ _id: new ObjectId(requestId) });
+
+                console.log('Agent:', agent);
+                console.log('User:', user);
+                console.log('Cash-Out Request:', cashOutRequest);
+
+                if (!agent || !user || !cashOutRequest) {
+                    console.log('Agent, user, or request not found');
+                    return res.status(404).send({ success: false, message: 'Agent, user, or request not found' });
+                }
+
+                if (agent.role !== 'agent' || user.role !== 'user') {
+                    console.log('Invalid roles');
+                    return res.status(403).send({ success: false, message: 'Invalid roles' });
+                }
+
+                // // Verify the password
+                // const isPasswordCorrect = await bcrypt.compare(password, agent.password);
+                // console.log('Is Password Correct:', isPasswordCorrect);
+                //
+                // if (!isPasswordCorrect) {
+                //     console.log('Incorrect password');
+                //     return res.status(401).send({ success: false, message: 'Incorrect password' });
+                // }
+
+                const amount = cashOutRequest.amount;
+                const fee = cashOutRequest.fee;
+                const totalDeduction = amount + fee;
+
+                // Check for sufficient balance
+                console.log('User Balance:', user.balance, 'Total Deduction:', totalDeduction);
+                if (user.balance < totalDeduction) {
+                    console.log('Insufficient balance');
+                    return res.status(400).send({ success: false, message: 'Insufficient balance' });
+                }
+
+                // Perform the transaction
+                console.log('Performing cash-out transaction...');
+                await usersCollection.updateOne(
+                    { email: userEmail },
+                    { $inc: { balance: -totalDeduction } }
+                );
+
+                await usersCollection.updateOne(
+                    { email: agentEmail },
+                    { $inc: { balance: amount + fee } }
+                );
+
+                // Save transaction
+                const transaction = {
+                    fromEmail: userEmail,
+                    toEmail: agentEmail,
+                    amount,
+                    fee,
+                    transType: 'cash-out',
+                    timestamp: new Date(),
+                };
+
+                await transactionsCollection.insertOne(transaction);
+
+                // Mark the request as approved
+                await cashOutRequestsCollection.updateOne(
+                    { _id: new ObjectId(requestId) },
+                    { $set: { status: 'approved', approvedAt: new Date() } }
+                );
+
+                console.log('Cash-out transaction successful');
+                res.send({ success: true, message: 'Cash-out request approved successfully' });
+            } catch (error) {
+                console.error('Error during cash-out approval:', error);
+                res.status(500).send({ success: false, message: 'Internal server error' });
+            }
+        });
+
+
+        app.get('/request-cash-out', verifyToken, async (req, res) => {
+            try {
+                const cashOutRequests = await cashOutRequestsCollection.find().toArray();
+                console.log('Cash-out requests retrieved:', cashOutRequests);
+                res.send({ success: true, cashOutRequests });
+            } catch (error) {
+                console.error('Error retrieving cash-out requests:', error);
+                res.status(500).send({ success: false, message: 'Internal server error' });
+            }
+        });
+
+        app.get('/request-cash-out/:email', verifyToken, async (req, res) => {
+            try {
+                const email = req.params.email;
+
+                const cashOutRequests = await cashOutRequestsCollection
+                    .find({ agentEmail: email})
+                    .sort({ requestedAt: -1 })
+                    .toArray();
+                console.log('Cash-in requests retrieved:', cashOutRequests);
+                res.send({ success: true, cashOutRequests });
+            } catch (error) {
+                console.error('Error retrieving cash-in requests:', error);
+                res.status(500).send({ success: false, message: 'Internal server error' });
+            }
+        });
+
+
+        // Reject Cash In Request
+        app.post('/reject-cash-out', verifyToken, async (req, res) => {
+            const { agentEmail, userEmail, requestId } = req.body;
+            console.log('Received cash-in approval request:', agentEmail, userEmail, requestId);
+
+            try {
+                const agent = await usersCollection.findOne({ email: agentEmail });
+                const user = await usersCollection.findOne({ email: userEmail });
+                const cashOutRequest = await cashOutRequestsCollection.findOne({ _id: new ObjectId(requestId) });
+
+                console.log('Agent:', agent);
+                console.log('User:', user);
+                console.log('Cash-Out Request:', cashOutRequest);
+
+                if (!agent || !user || !cashOutRequest) {
+                    console.log('Agent, user, or request not found');
+                    return res.status(404).send({ success: false, message: 'Agent, user, or request not found' });
+                }
+
+                // Mark the request as approved
+                await cashOutRequestsCollection.updateOne(
+                    { _id: new ObjectId(requestId) },
+                    { $set: { status: 'rejected', rejectedAt: new Date() } }
+                );
+
+                console.log('Cash-Out rejection successful');
+                res.send({ success: true, message: 'Cash-Out request rejected successfully' });
+            } catch (error) {
+                console.error('Error during cash-Out rejection:', error);
                 res.status(500).send({ success: false, message: 'Internal server error' });
             }
         });
