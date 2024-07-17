@@ -184,9 +184,11 @@ async function run() {
 
         app.get('/user/:identifier', async (req, res) => {
             const identifier =  req.params.identifier;
+
             const storedUser = await usersCollection.findOne({
                 $or: [{ email: identifier }, { phone: identifier }],
             });
+            //console.log(storedUser)
             res.send(storedUser);
         });
 
@@ -388,6 +390,40 @@ async function run() {
                 res.send({ success: true, message: 'Cash-in request approved successfully' });
             } catch (error) {
                 console.error('Error during cash-in approval:', error);
+                res.status(500).send({ success: false, message: 'Internal server error' });
+            }
+        });
+
+
+        // Reject Cash In Request
+        app.post('/reject-cash-in', verifyToken, async (req, res) => {
+            const { agentEmail, userEmail, requestId } = req.body;
+            console.log('Received cash-in approval request:', agentEmail, userEmail, requestId);
+
+            try {
+                const agent = await usersCollection.findOne({ email: agentEmail });
+                const user = await usersCollection.findOne({ email: userEmail });
+                const cashInRequest = await cashInRequestsCollection.findOne({ _id: new ObjectId(requestId) });
+
+                console.log('Agent:', agent);
+                console.log('User:', user);
+                console.log('Cash-In Request:', cashInRequest);
+
+                if (!agent || !user || !cashInRequest) {
+                    console.log('Agent, user, or request not found');
+                    return res.status(404).send({ success: false, message: 'Agent, user, or request not found' });
+                }
+
+                // Mark the request as approved
+                await cashInRequestsCollection.updateOne(
+                    { _id: new ObjectId(requestId) },
+                    { $set: { status: 'rejected', rejectedAt: new Date() } }
+                );
+
+                console.log('Cash-in rejection successful');
+                res.send({ success: true, message: 'Cash-in request rejected successfully' });
+            } catch (error) {
+                console.error('Error during cash-in rejection:', error);
                 res.status(500).send({ success: false, message: 'Internal server error' });
             }
         });
