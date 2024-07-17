@@ -704,7 +704,7 @@ async function run() {
         });
 
 
-
+        // get all trans of a user
         app.get('/transactions/:email',verifyToken, async (req, res) => {
             const email = req.params.email;
 
@@ -716,6 +716,34 @@ async function run() {
 
             res.send(transactions);
         });
+
+        // get all transactions with pagination
+        app.get('/transactions', verifyToken, async (req, res) => {
+            try {
+                const page = parseInt(req.query.page) || 1;
+                const limit = parseInt(req.query.limit) || 15;
+                const skip = (page - 1) * limit;
+
+                const totalTransactions = await transactionsCollection.countDocuments();
+                const totalPages = Math.ceil(totalTransactions / limit);
+
+                const transactions = await transactionsCollection
+                    .find({})
+                    .sort({ timestamp: -1 })
+                    .skip(skip)
+                    .limit(limit)
+                    .toArray();
+
+                res.send({
+                    transactions,
+                    totalPages,
+                });
+            } catch (error) {
+                console.error('Error fetching transactions:', error);
+                res.status(500).send('Error fetching transactions');
+            }
+        });
+
 
 
 
