@@ -127,6 +127,7 @@ async function run() {
 
         app.get('/user', async (req, res) => {
             const token = req.cookies.token;
+            console.log(token)
             if (!token) return res.status(401).send('Not authenticated');
 
             try {
