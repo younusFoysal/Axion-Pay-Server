@@ -127,7 +127,7 @@ async function run() {
 
         app.get('/user', async (req, res) => {
             const token = req.cookies.token;
-            console.log(token)
+            //console.log(token)
             if (!token) return res.status(401).send('Not authenticated');
 
             try {
@@ -768,6 +768,38 @@ async function run() {
                 res.status(401).send('Not authenticated');
             }
         });
+
+
+        // TODO: Admin Stat
+        app.get('/transactionsStats', async (req, res) => {
+            //console.log("Endpoint /transactions/stats called");
+            try {
+                // Count total transactions
+                const totalTransactions = await transactionsCollection.countDocuments();
+                //console.log("Total transactions:", totalTransactions);
+
+                const sendMoneyCount = await transactionsCollection.countDocuments({ transType: 'sendmoney' });
+                const cashInCount = await transactionsCollection.countDocuments({ transType: 'cash-in' });
+                const cashOutCount = await transactionsCollection.countDocuments({ transType: 'cash-out' });
+
+                // Prepare the response data
+                const data = {
+                    totalTransactions,
+                    sendMoneyCount,
+                    cashInCount,
+                    cashOutCount
+                };
+
+                // Send the response
+                res.send(data);
+            } catch (error) {
+                console.error('Error fetching transaction stats:', error);
+                res.status(500).send('Internal Server Error');
+            }
+        });
+
+
+
 
 
 
